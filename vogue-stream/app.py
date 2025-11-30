@@ -6,14 +6,12 @@ from flask_cors import CORS
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 import requests
 
 app = Flask(__name__, template_folder='templates')
 CORS(app)
 
-# Hlavičky pro requests (aby si web myslel, že jsme člověk)
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Accept-Language': 'cs,en-US;q=0.7,en;q=0.3',
@@ -21,51 +19,45 @@ HEADERS = {
 
 def get_chrome_driver():
     chrome_options = Options()
+    # Tyto argumenty jsou pro Render server nezbytné
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # Cesta k Chrome na Renderu
+    # Hledáme Chrome na serveru
     paths = [
         "/opt/render/project/.render/chrome/opt/google/chrome/google-chrome",
         "/opt/render/project/src/.render/chrome/opt/google/chrome/google-chrome"
     ]
     
-    binary_path = None
+    binary_found = False
     for path in paths:
         if os.path.exists(path):
-            print(f"DEBUG: Chrome binárka nalezena: {path}", file=sys.stderr)
+            print(f"DEBUG: Chrome nalezen: {path}", file=sys.stderr)
             chrome_options.binary_location = path
-            binary_path = path
+            binary_found = True
             break
-            
-    # MAGIE: Pokud jsme našli binárku, řekneme managerovi, ať stáhne driver PŘESNĚ pro ni
-    try:
-        if binary_path:
-            # Získáme verzi nainstalovaného Chrome a stáhneme odpovídající driver
-            driver_path = ChromeDriverManager().install()
-        else:
-            driver_path = ChromeDriverManager().install()
-            
-        print(f"DEBUG: Driver nainstalován: {driver_path}", file=sys.stderr)
-        service = Service(driver_path)
-        return webdriver.Chrome(service=service, options=chrome_options)
-        
-    except Exception as e:
-        print(f"CHYBA DRIVERU: {e}", file=sys.stderr)
-        raise e
+    
+    if not binary_found:
+        print("DEBUG: Chrome nenalezen na vlastní cestě, spoléhám na systém...", file=sys.stderr)
+
+    # ZDE JE ZMĚNA: Nepoužíváme ChromeDriverManager.
+    # Selenium 4.27 si samo najde/stáhne driver podle verze prohlížeče.
+    service = Service() 
+    
+    return webdriver.Chrome(service=service, options=chrome_options)
 
 def get_direct_video_url(page_url):
     driver = None
     try:
-        print(f"DEBUG: Spouštím Selenium na: {page_url}", file=sys.stderr)
+        print(f"DEBUG: Selenium otevírá: {page_url}", file=sys.stderr)
         driver = get_chrome_driver()
         driver.get(page_url)
-        time.sleep(5) # Čekání na načtení skriptů
+        time.sleep(4) 
         
-        # 1. Zkusíme najít ID
+        # 1. Priorita: ID
         try:
             video = driver.find_element("id", "content_video_html5_api")
             src = video.get_attribute("src")
@@ -73,7 +65,7 @@ def get_direct_video_url(page_url):
         except:
             pass
 
-        # 2. Zkusíme najít jakýkoliv MP4 source
+        # 2. Priorita: Jakýkoliv MP4 source
         sources = driver.find_elements("tag name", "source")
         for s in sources:
             src = s.get_attribute("src")
@@ -92,42 +84,49 @@ def find_movie(query):
     search_url = base + query.replace(" ", "+")
     
     try:
-        print(f"DEBUG: Stahuji stránku {search_url}", file=sys.stderr)
+        print(f"DEBUG: Requests hledá: {search_url}", file=sys.stderr)
         r = requests.get(search_url, headers=HEADERS)
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # TADY BYLA CHYBA - Přidáme seznam zakázaných slov
-        forbidden_words = ['nahrat', 'profil', 'registrace', 'prihlaseni', 'podminky', 'dmca', 'kontakt', 'premium']
+        # ČERNÁ LISTINA - slova, která nesmí být v odkazu ani v textu
+        blacklist = ['nahrat', 'profil', 'registrace', 'prihlaseni', 'podminky', 'dmca', 'kontakt', 'premium', 'upload']
         
         candidates = []
         for a in soup.find_all('a', href=True):
             href = a['href']
-            text = a.get_text(strip=True)
+            text = a.get_text(strip=True).lower()
+            href_lower = href.lower()
             
-            # Přísnější filtr
-            if href.startswith('/') and 'hledej' not in href and len(text) > 3:
-                # Kontrola zakázaných slov
-                if any(bad_word in href.lower() for bad_word in forbidden_words):
+            # Musí to být interní odkaz a mít nějakou délku
+            if href.startswith('/') and len(text) > 3:
+                
+                # 1. Kontrola Blacklistu (pokud obsahuje zakázané slovo, přeskočit)
+                if any(bad in href_lower for bad in blacklist) or any(bad in text for bad in blacklist):
                     continue
-                    
-                full_link = "https://prehrajto.cz" + href
-                candidates.append((text, full_link))
+                
+                # 2. Kontrola relevance (volitelné, ale bezpečné)
+                # Odkaz by měl ideálně obsahovat část hledaného názvu
+                # Rozdělíme hledaný dotaz na slova a zkontrolujeme, zda alespoň jedno je v názvu odkazu
+                query_parts = query.lower().split()
+                if any(part in text for part in query_parts if len(part) > 2):
+                    full_link = "https://prehrajto.cz" + href
+                    candidates.append((a.get_text(strip=True), full_link))
 
-        print(f"DEBUG: Nalezeno {len(candidates)} validních kandidátů.", file=sys.stderr)
+        print(f"DEBUG: Nalezeno {len(candidates)} relevantních filmů.", file=sys.stderr)
 
         if not candidates:
-            return {"error": "Žádný film nenalezen (seznam prázdný)"}
+            return {"error": "Film nenalezen (žádné relevantní výsledky)."}
 
-        # Vezmeme první validní výsledek
+        # Vezmeme první
         best_title, best_link = candidates[0]
-        print(f"DEBUG: Vítěz: {best_title} -> {best_link}", file=sys.stderr)
+        print(f"DEBUG: Vybrán vítěz: {best_title} -> {best_link}", file=sys.stderr)
         
         video_url = get_direct_video_url(best_link)
         
         if video_url:
             return {"title": best_title, "url": video_url}
         else:
-            return {"error": "Nepodařilo se extrahovat video (odkaz nenalezen)"}
+            return {"error": "Nepodařilo se vytáhnout video z přehrávače."}
 
     except Exception as e:
         print(f"CRITICAL ERROR: {e}", file=sys.stderr)
