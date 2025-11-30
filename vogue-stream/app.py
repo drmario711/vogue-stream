@@ -2,23 +2,19 @@ import os
 import sys
 import time
 import re
-import difflib
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from bs4 import BeautifulSoup
 
 app = Flask(__name__, template_folder='templates')
 CORS(app)
 
 def get_chrome_driver():
     chrome_options = Options()
-    # Nutné nastavení pro Render
+    # Nastavení pro server (Render)
     chrome_options.add_argument("--headless=new") 
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -26,56 +22,66 @@ def get_chrome_driver():
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # Hledání cesty k Chrome
+    # Najdi Chrome na Renderu
     paths = [
         "/opt/render/project/.render/chrome/opt/google/chrome/google-chrome",
         "/opt/render/project/src/.render/chrome/opt/google/chrome/google-chrome"
     ]
     for path in paths:
         if os.path.exists(path):
-            print(f"DEBUG: Chrome nalezen: {path}", file=sys.stderr)
             chrome_options.binary_location = path
             break
     
     service = Service()
     return webdriver.Chrome(service=service, options=chrome_options)
 
-def parse_size_mb(text):
-    """Vytáhne velikost v MB z textu"""
-    try:
-        match = re.search(r'(\d+[.,]?\d*)\s*(GB|MB)', text, re.IGNORECASE)
-        if not match: return 0
-        val = float(match.group(1).replace(',', '.'))
-        unit = match.group(2).upper()
-        return val * 1024 if unit == 'GB' else val
-    except:
-        return 0
-
-def extract_video_from_page(driver, url):
-    """Jde na stránku a zkusí najít MP4"""
-    try:
-        print(f"DEBUG: Otevírám detail videa: {url}", file=sys.stderr)
-        driver.get(url)
-        time.sleep(4) # Čas na načtení přehrávače
+def get_size_in_gb(text):
+    """
+    Hledá v textu 'GB'. Pokud najde '9.29 GB', vrátí číslo 9.29.
+    Pokud je to v MB, vrátí malinké číslo (např. 0.5).
+    Pokud nic nenajde, vrátí 0.
+    """
+    if not text: return 0
+    text = text.upper().replace(',', '.')
+    
+    # Hledáme číslo následované GB
+    match_gb = re.search(r'(\d+\.?\d*)\s*GB', text)
+    if match_gb:
+        return float(match_gb.group(1))
         
-        # 1. Zkusíme HTML5 video tag
+    # Hledáme číslo následované MB (vydělíme 1024, aby to bylo v GB)
+    match_mb = re.search(r'(\d+\.?\d*)\s*MB', text)
+    if match_mb:
+        return float(match_mb.group(1)) / 1024.0
+        
+    return 0
+
+def extract_video_direct_link(driver, url):
+    """Otevře detail filmu a najde MP4 odkaz"""
+    try:
+        print(f"DEBUG: Otevírám detail: {url}", file=sys.stderr)
+        driver.get(url)
+        time.sleep(3) # Počkáme na načtení přehrávače
+        
+        # 1. Nejlepší metoda: Najít <video> tag s ID
         try:
             video = driver.find_element(By.ID, "content_video_html5_api")
             src = video.get_attribute("src")
-            if src and len(src) > 10: return src
+            if src and "http" in src: 
+                return src
         except:
             pass
-
-        # 2. Zkusíme source tagy
+            
+        # 2. Záložní metoda: Najít jakýkoliv zdroj s .mp4
         sources = driver.find_elements(By.TAG_NAME, "source")
-        for s in sources:
-            src = s.get_attribute("src")
+        for source in sources:
+            src = source.get_attribute("src")
             if src and "mp4" in src:
                 return src
-        
+                
         return None
     except Exception as e:
-        print(f"DEBUG: Chyba při extrakci: {e}", file=sys.stderr)
+        print(f"DEBUG: Chyba extrakce: {e}", file=sys.stderr)
         return None
 
 def find_movie(query):
@@ -83,89 +89,78 @@ def find_movie(query):
     try:
         driver = get_chrome_driver()
         
-        # 1. VYHLEDÁVÁNÍ (Nyní přes Selenium, aby se načetlo vše!)
-        base = "https://prehrajto.cz/hledej/"
-        search_url = base + query.replace(" ", "+")
-        print(f"DEBUG: Načítám seznam výsledků: {search_url}", file=sys.stderr)
+        # 1. Jdeme na vyhledávání
+        search_url = f"https://prehrajto.cz/hledej/{query.replace(' ', '+')}"
+        print(f"DEBUG: Hledám na: {search_url}", file=sys.stderr)
         
         driver.get(search_url)
-        time.sleep(5) # Počkáme, až JavaScript vykreslí výsledky
+        time.sleep(5) # Počkáme, až se načtou obrázky a texty
         
-        # Získáme HTML z prohlížeče
-        soup = BeautifulSoup(driver.page_source, 'html.parser')
+        # 2. Najdeme všechny odkazy na stránce
+        # Hledáme elementy, které vypadají jako položky videa
+        all_links = driver.find_elements(By.TAG_NAME, "a")
         
         candidates = []
-        query_words = [w.lower() for w in query.split() if len(w) > 2]
         
-        # Projdeme VŠECHNY odkazy
-        all_links = soup.find_all('a', href=True)
-        print(f"DEBUG: Na stránce nalezeno celkem {len(all_links)} odkazů.", file=sys.stderr)
-
-        for a in all_links:
-            href = a['href']
-            text = a.get_text(strip=True)
-            text_lower = text.lower()
-            
-            # Musí to být odkaz na video (ne /front/, ne /hledej/)
-            if href.startswith('/') and len(text) > 3:
-                if any(x in href for x in ['/front/', '/hledej/', '/profil/', 'registrace', 'podminky']):
-                    continue
+        for link in all_links:
+            try:
+                href = link.get_attribute("href")
+                # Získáme všechen text uvnitř odkazu (včetně velikosti, času atd.)
+                # .get_attribute("innerText") je často spolehlivější než .text u skrytých prvků
+                full_text = link.get_attribute("innerText") 
                 
-                # KLÍČOVÝ FILTR: Odkaz MUSÍ obsahovat alespoň jedno slovo z dotazu
-                # Např. pokud hledáš "Harry Potter", text musí obsahovat "harry" nebo "potter"
-                match_word = False
-                for qw in query_words:
-                    if qw in text_lower:
-                        match_word = True
-                        break
+                if not href or not full_text: continue
                 
-                if not match_word:
+                # Zjednodušený filtr:
+                # 1. Musí to být odkaz na detail (ne reklama, ne login)
+                if "/hledej/" in href or "partner" in href or "registrace" in href: continue
+                if not href.startswith("https://prehrajto.cz"): continue
+                
+                # 2. Musí obsahovat hledaný název (stačí část)
+                # Rozdělíme hledaný dotaz na slova (např. "harry potter" -> "harry", "potter")
+                query_parts = query.lower().split()
+                # Pokud alespoň jedno slovo z dotazu není v textu odkazu, ignorujeme to
+                if not any(part in full_text.lower() for part in query_parts if len(part) > 2):
                     continue
 
-                # Zkusíme najít velikost
-                full_context = text
-                if a.parent: full_context += " " + a.parent.get_text()
-                size_mb = parse_size_mb(full_context)
+                # 3. Získáme velikost
+                size_gb = get_size_in_gb(full_text)
                 
-                # Spočítáme shodu celého názvu
-                ratio = difflib.SequenceMatcher(None, query.lower(), text_lower).ratio()
+                # Pokud to má méně než 0.1 GB (100MB), je to asi blbost nebo trailer
+                if size_gb < 0.1: continue
                 
                 candidates.append({
-                    'title': text,
-                    'link': "https://prehrajto.cz" + href,
-                    'size_mb': size_mb,
-                    'ratio': ratio
+                    "title": full_text.split('\n')[0].strip(), # První řádek je obvykle název
+                    "link": href,
+                    "size": size_gb
                 })
+                
+            except:
+                continue
 
-        print(f"DEBUG: Po filtrování zbylo {len(candidates)} relevantních filmů.", file=sys.stderr)
+        print(f"DEBUG: Nalezeno {len(candidates)} možných souborů.", file=sys.stderr)
 
         if not candidates:
-            return {"error": "Nenalezen žádný film odpovídající dotazu."}
+            return {"error": "Nenalezeny žádné videosoubory."}
 
-        # Seřadíme: 1. Velikost, 2. Podobnost názvu
-        candidates.sort(key=lambda x: (x['size_mb'], x['ratio']), reverse=True)
-
-        # Zkusíme projít TOP 3 kandidáty (kdyby první nefungoval)
-        for i, best in enumerate(candidates[:3]):
-            print(f"DEBUG: Zkouším kandidáta č.{i+1}: {best['title']} ({best['size_mb']} MB)", file=sys.stderr)
-            
-            video_url = extract_video_from_page(driver, best['link'])
+        # 3. SEŘADIT PODLE VELIKOSTI (Největší = Nejlepší kvalita)
+        candidates.sort(key=lambda x: x['size'], reverse=True)
+        
+        # Zkusíme postupně nejlepší 3 (kdyby první nešel)
+        for cand in candidates[:3]:
+            print(f"DEBUG: Zkouším: {cand['title']} ({cand['size']:.2f} GB)", file=sys.stderr)
+            video_url = extract_video_direct_link(driver, cand['link'])
             
             if video_url:
-                print(f"DEBUG: ÚSPĚCH! Video nalezeno.", file=sys.stderr)
-                return {"title": best['title'], "url": video_url}
-            else:
-                print(f"DEBUG: U tohoto kandidáta video nešlo extrahovat.", file=sys.stderr)
+                return {"title": cand['title'], "url": video_url}
         
-        return {"error": "Video se nepodařilo přehrát u žádného z nalezených souborů."}
+        return {"error": "Nepodařilo se získat přímý odkaz na video."}
 
     except Exception as e:
         print(f"CRITICAL ERROR: {e}", file=sys.stderr)
         return {"error": str(e)}
     finally:
-        if driver:
-            try: driver.quit()
-            except: pass
+        if driver: driver.quit()
 
 @app.route('/')
 def home():
