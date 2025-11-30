@@ -1,6 +1,8 @@
 import os
 import sys
 import time
+import re
+import difflib # Knihovna pro porovnávání podobnosti textů
 from flask import Flask, request, jsonify, render_template
 from flask_cors import CORS
 from selenium import webdriver
@@ -32,12 +34,28 @@ def get_chrome_driver():
     
     for path in paths:
         if os.path.exists(path):
-            print(f"DEBUG: Chrome nalezen: {path}", file=sys.stderr)
             chrome_options.binary_location = path
             break
     
     service = Service()
     return webdriver.Chrome(service=service, options=chrome_options)
+
+def parse_size_mb(text):
+    """Najde v textu velikost (např. 1.5 GB) a převede na MB"""
+    try:
+        # Hledáme vzor: číslo následované GB nebo MB
+        match = re.search(r'(\d+[.,]?\d*)\s*(GB|MB)', text, re.IGNORECASE)
+        if not match:
+            return 0
+        
+        number = float(match.group(1).replace(',', '.'))
+        unit = match.group(2).upper()
+        
+        if unit == 'GB':
+            return number * 1024
+        return number # MB
+    except:
+        return 0
 
 def get_direct_video_url(page_url):
     driver = None
@@ -47,6 +65,7 @@ def get_direct_video_url(page_url):
         driver.get(page_url)
         time.sleep(5) 
         
+        # Pokus 1: ID
         try:
             video = driver.find_element("id", "content_video_html5_api")
             src = video.get_attribute("src")
@@ -54,6 +73,7 @@ def get_direct_video_url(page_url):
         except:
             pass
 
+        # Pokus 2: Source tagy
         sources = driver.find_elements("tag name", "source")
         for s in sources:
             src = s.get_attribute("src")
@@ -75,56 +95,62 @@ def find_movie(query):
         r = requests.get(search_url, headers=HEADERS)
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # Rozšířený blacklist o reklamy
-        blacklist = ['nahrat', 'profil', 'registrace', 'prihlaseni', 'podminky', 'dmca', 'kontakt', 'premium', 'google-tv', 'aplikace', 'kliknete', 'zde', 'domu']
-        
-        # Rozdělíme hledaný dotaz na slova (např. ["harry", "potter"])
-        # Ignorujeme krátká slova jako "a", "i", "the"
-        query_words = [w.lower() for w in query.split() if len(w) > 2]
-        
         candidates = []
+        
+        # Projdeme všechny odkazy na stránce
         for a in soup.find_all('a', href=True):
             href = a['href']
-            text = a.get_text(strip=True).lower()
-            href_lower = href.lower()
+            text = a.get_text(strip=True)
             
+            # Základní filtr: Musí to být interní odkaz a mít nějaký text
             if href.startswith('/') and len(text) > 3:
-                # 1. Blacklist check
-                if any(bad in href_lower for bad in blacklist) or any(bad in text for bad in blacklist):
+                
+                # 1. FUZZY MATCHING (Podobnost)
+                # Spočítáme, jak moc je text podobný dotazu (0.0 až 1.0)
+                similarity = difflib.SequenceMatcher(None, query.lower(), text.lower()).ratio()
+                
+                # Pokud je shoda menší než 30%, je to pravděpodobně reklama nebo menu -> ignorujeme
+                if similarity < 0.3:
                     continue
                 
-                # 2. LOGIKA RELEVANCE (To opraví ten Google TV problém)
-                # Spočítáme, kolik slov z dotazu se nachází v názvu odkazu
-                match_count = 0
-                for word in query_words:
-                    if word in text:
-                        match_count += 1
+                # 2. VELIKOST (Kvalita)
+                # Zkusíme najít velikost v textu odkazu nebo v jeho okolí (rodičovský prvek)
+                # Často je velikost napsaná hned vedle názvu
+                full_text_context = text
+                if a.parent:
+                    full_text_context = a.parent.get_text(strip=True)
                 
-                # Pokud odkaz neobsahuje ani jedno slovo z dotazu, ignorujeme ho!
-                if match_count == 0:
-                    continue
+                size_mb = parse_size_mb(full_text_context)
+                
+                candidates.append({
+                    'title': text,
+                    'link': "https://prehrajto.cz" + href,
+                    'similarity': similarity,
+                    'size_mb': size_mb
+                })
 
-                full_link = "https://prehrajto.cz" + href
-                # Uložíme kandidáta i s jeho skóre relevance
-                candidates.append({'text': text, 'link': full_link, 'score': match_count})
-
-        print(f"DEBUG: Nalezeno {len(candidates)} relevantních filmů.", file=sys.stderr)
+        print(f"DEBUG: Nalezeno {len(candidates)} kandidátů nad 30% shody.", file=sys.stderr)
 
         if not candidates:
-            return {"error": "Žádný odkaz neodpovídá názvu filmu."}
+            return {"error": "Nenalezen žádný soubor s podobným názvem."}
 
-        # Seřadíme kandidáty podle skóre (nejvíce shodných slov první)
-        candidates.sort(key=lambda x: x['score'], reverse=True)
+        # 3. SEŘAZENÍ (To je to kouzlo)
+        # Seřadíme to primárně podle VELIKOSTI (největší první)
+        # Sekundárně podle PODOBNOSTI
+        candidates.sort(key=lambda x: (x['size_mb'], x['similarity']), reverse=True)
 
         best = candidates[0]
-        print(f"DEBUG: Vítěz (skóre {best['score']}): {best['text']} -> {best['link']}", file=sys.stderr)
+        print(f"DEBUG: VÍTĚZ: '{best['title']}' (Velikost: {best['size_mb']} MB, Shoda: {best['similarity']:.2f})", file=sys.stderr)
+        
+        # Pokud je vítěz "podezřele malý" (např. pod 50MB) a máme jiné kandidáty, 
+        # možná je to jen trailer. Ale pro začátek věřme velikosti.
         
         video_url = get_direct_video_url(best['link'])
         
         if video_url:
-            return {"title": best['text'].title(), "url": video_url}
+            return {"title": best['title'], "url": video_url}
         else:
-            return {"error": "Nepodařilo se vytáhnout video z přehrávače."}
+            return {"error": "Nepodařilo se vytáhnout video."}
 
     except Exception as e:
         print(f"CRITICAL ERROR: {e}", file=sys.stderr)
