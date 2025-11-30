@@ -1,40 +1,166 @@
-async function search() {
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VOGUE STREAM</title>
+    <style>
+        /* LUXUSNÍ VOGUE STYL */
+        body { 
+            background-color: #000; 
+            color: #fff; 
+            font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center; 
+            min-height: 100vh; 
+            margin: 0;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        h1 { 
+            font-family: 'Times New Roman', serif; 
+            letter-spacing: 5px; 
+            text-transform: uppercase; 
+            font-size: 2.5rem;
+            margin-bottom: 40px;
+        }
+        input { 
+            background: transparent; 
+            border: none; 
+            border-bottom: 2px solid #555; 
+            color: white; 
+            padding: 15px; 
+            text-align: center; 
+            font-size: 1.2rem; 
+            width: 100%; 
+            max-width: 400px;
+            outline: none; 
+            margin-bottom: 30px;
+            font-family: serif;
+        }
+        input:focus {
+            border-bottom-color: #fff;
+        }
+        button { 
+            background: #fff; 
+            color: #000; 
+            border: none; 
+            padding: 15px 50px; 
+            text-transform: uppercase; 
+            font-weight: bold; 
+            letter-spacing: 3px; 
+            cursor: pointer; 
+            transition: opacity 0.3s;
+        }
+        button:hover {
+            opacity: 0.8;
+        }
+        
+        #player-container { 
+            margin-top: 40px; 
+            width: 100%; 
+            max-width: 800px; 
+            display: none; 
+            animation: fadeIn 1s;
+        }
+        
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+        video { 
+            width: 100%; 
+            border: 1px solid #333; 
+            box-shadow: 0 0 50px rgba(255,255,255,0.1);
+        }
+        
+        .loader { 
+            display: none; 
+            border: 3px solid #333; 
+            border-top: 3px solid #fff; 
+            border-radius: 50%; 
+            width: 30px; 
+            height: 30px; 
+            animation: spin 1s linear infinite; 
+            margin-top: 30px; 
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        
+        #status {
+            margin-top: 20px;
+            color: #666;
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            text-align: center;
+            max-width: 80%;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Vogue Stream</h1>
+    
+    <input type="text" id="q" placeholder="ENTER TITLE HERE">
+    <button onclick="search()">ACQUIRE</button>
+    
+    <div class="loader" id="loader"></div>
+    <div id="status">System Ready</div>
+
+    <div id="player-container">
+        <h2 id="title" style="font-family: serif; font-weight: normal; margin-bottom: 10px; font-size: 1.2rem;"></h2>
+        <video id="videoPlayer" controls playsinline poster="https://via.placeholder.com/800x450/000000/333333?text=STREAM+LOADING"></video>
+        <p style="color: #444; font-size: 0.7rem; margin-top: 10px;">
+            TAP VIDEO TO PLAY • USE AIRPLAY/CAST ICON IN PLAYER
+        </p>
+    </div>
+
+    <script>
+        async function search() {
             const q = document.getElementById('q').value;
             const loader = document.getElementById('loader');
             const status = document.getElementById('status');
             const container = document.getElementById('player-container');
             
-            if(!q) return;
+            if(!q) {
+                status.innerText = "Please enter a title.";
+                return;
+            }
             
             loader.style.display = "block";
             container.style.display = "none";
-            status.innerText = "Connecting to server...";
+            status.innerText = "Searching archives...";
             status.style.color = "#888";
 
             try {
+                // Voláme náš Python server
                 const res = await fetch(`/search?q=${encodeURIComponent(q)}`);
                 const data = await res.json();
                 
                 if (data.url) {
-                    status.innerText = "Stream ready.";
-                    status.style.color = "#0f0"; // Zelená
+                    status.innerText = "Stream acquired successfully.";
+                    status.style.color = "#fff"; 
+                    
                     document.getElementById('title').innerText = data.title;
                     const video = document.getElementById('videoPlayer');
                     video.src = data.url;
+                    
                     container.style.display = "block";
-                    video.play();
+                    video.play().catch(e => console.log("Autoplay blocked, user must click play"));
                 } else if (data.error) {
-                    // TADY SE UKÁŽE SKUTEČNÁ CHYBA
-                    status.innerText = "Error: " + data.error;
-                    status.style.color = "red";
+                    status.innerText = "System Error: " + data.error;
+                    status.style.color = "#ff4444";
                 } else {
-                    status.innerText = "Movie not found.";
-                    status.style.color = "orange";
+                    status.innerText = "Movie not found in database.";
+                    status.style.color = "#ffaa00";
                 }
             } catch (e) {
-                status.innerText = "Connection failed.";
-                status.style.color = "red";
+                status.innerText = "Connection failed. Server might be restarting.";
+                status.style.color = "#ff4444";
             } finally {
                 loader.style.display = "none";
             }
         }
+    </script>
+</body>
+</html>
