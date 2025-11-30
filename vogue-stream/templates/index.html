@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="cs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VOGUE STREAM</title>
+    <style>
+        body { background: #000; color: #fff; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+        h1 { font-family: 'Times New Roman', serif; letter-spacing: 5px; text-transform: uppercase; }
+        input { background: transparent; border: none; border-bottom: 1px solid #555; color: white; padding: 10px; text-align: center; font-size: 1.2rem; width: 80%; outline: none; margin-bottom: 20px;}
+        button { background: #fff; color: #000; border: none; padding: 15px 40px; text-transform: uppercase; font-weight: bold; letter-spacing: 2px; cursor: pointer; }
+        #player-container { margin-top: 30px; width: 90%; max-width: 600px; display: none; }
+        video { width: 100%; border: 1px solid #333; }
+        .loader { display: none; border: 2px solid #333; border-top: 2px solid #fff; border-radius: 50%; width: 20px; height: 20px; animation: spin 1s linear infinite; margin-top: 20px; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <h1>Vogue Stream</h1>
+    <input type="text" id="q" placeholder="SEARCH TITLE">
+    <button onclick="search()">ACQUIRE</button>
+    
+    <div class="loader" id="loader"></div>
+    <div id="status" style="margin-top: 10px; color: #666; font-size: 0.8rem;">Ready</div>
+
+    <div id="player-container">
+        <h3 id="title" style="font-family: serif; margin-bottom: 5px;"></h3>
+        <video id="videoPlayer" controls playsinline></video>
+        <p style="color: #444; font-size: 0.7rem;">Use native player controls to Cast/AirPlay</p>
+    </div>
+
+    <script>
+        async function search() {
+            const q = document.getElementById('q').value;
+            const loader = document.getElementById('loader');
+            const status = document.getElementById('status');
+            const container = document.getElementById('player-container');
+            
+            if(!q) return;
+            
+            loader.style.display = "block";
+            container.style.display = "none";
+            status.innerText = "Processing archival footage...";
+
+            try {
+                // Relativní cesta - funguje automaticky na jakékoliv doméně
+                const res = await fetch(`/search?q=${encodeURIComponent(q)}`);
+                const data = await res.json();
+                
+                if (data.url) {
+                    status.innerText = "Stream ready.";
+                    document.getElementById('title').innerText = data.title;
+                    const video = document.getElementById('videoPlayer');
+                    video.src = data.url;
+                    container.style.display = "block";
+                    video.play();
+                } else {
+                    status.innerText = "Not found.";
+                }
+            } catch (e) {
+                status.innerText = "Error.";
+            } finally {
+                loader.style.display = "none";
+            }
+        }
+    </script>
+</body>
+</html>
