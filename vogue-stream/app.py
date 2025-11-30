@@ -19,14 +19,12 @@ HEADERS = {
 
 def get_chrome_driver():
     chrome_options = Options()
-    # Nastavení pro Render server
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
     
-    # Hledáme Chrome na serveru
     paths = [
         "/opt/render/project/.render/chrome/opt/google/chrome/google-chrome",
         "/opt/render/project/src/.render/chrome/opt/google/chrome/google-chrome"
@@ -38,10 +36,7 @@ def get_chrome_driver():
             chrome_options.binary_location = path
             break
     
-    # NOVINKA: Nepoužíváme žádný manager. Pouze prázdný Service().
-    # Selenium 4.27+ si samo stáhne správný driver.
     service = Service()
-    
     return webdriver.Chrome(service=service, options=chrome_options)
 
 def get_direct_video_url(page_url):
@@ -52,7 +47,6 @@ def get_direct_video_url(page_url):
         driver.get(page_url)
         time.sleep(5) 
         
-        # 1. Priorita: ID
         try:
             video = driver.find_element("id", "content_video_html5_api")
             src = video.get_attribute("src")
@@ -60,13 +54,11 @@ def get_direct_video_url(page_url):
         except:
             pass
 
-        # 2. Priorita: Jakýkoliv MP4 source
         sources = driver.find_elements("tag name", "source")
         for s in sources:
             src = s.get_attribute("src")
             if src and "mp4" in src:
                 return src
-                
         return None
     except Exception as e:
         print(f"ERROR SELENIUM: {e}", file=sys.stderr)
@@ -83,8 +75,12 @@ def find_movie(query):
         r = requests.get(search_url, headers=HEADERS)
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # PŘÍSNÁ ČERNÁ LISTINA - všechna menu tlačítka
-        blacklist = ['nahrat', 'nahrát', 'profil', 'registrace', 'prihlaseni', 'podminky', 'dmca', 'kontakt', 'premium', 'domů', 'domu', 'videa', 'novinky']
+        # Rozšířený blacklist o reklamy
+        blacklist = ['nahrat', 'profil', 'registrace', 'prihlaseni', 'podminky', 'dmca', 'kontakt', 'premium', 'google-tv', 'aplikace', 'kliknete', 'zde', 'domu']
+        
+        # Rozdělíme hledaný dotaz na slova (např. ["harry", "potter"])
+        # Ignorujeme krátká slova jako "a", "i", "the"
+        query_words = [w.lower() for w in query.split() if len(w) > 2]
         
         candidates = []
         for a in soup.find_all('a', href=True):
@@ -92,36 +88,41 @@ def find_movie(query):
             text = a.get_text(strip=True).lower()
             href_lower = href.lower()
             
-            # Musí to být interní odkaz
-            if href.startswith('/'):
-                # 1. Ignorovat přesnou shodu s rootem (domů)
-                if href == '/' or href == 'https://prehrajto.cz/':
-                    continue
-
-                # 2. Kontrola Blacklistu
+            if href.startswith('/') and len(text) > 3:
+                # 1. Blacklist check
                 if any(bad in href_lower for bad in blacklist) or any(bad in text for bad in blacklist):
                     continue
                 
-                # 3. Musí mít rozumnou délku (filmy mají delší názvy než "Domů")
-                if len(text) < 4:
+                # 2. LOGIKA RELEVANCE (To opraví ten Google TV problém)
+                # Spočítáme, kolik slov z dotazu se nachází v názvu odkazu
+                match_count = 0
+                for word in query_words:
+                    if word in text:
+                        match_count += 1
+                
+                # Pokud odkaz neobsahuje ani jedno slovo z dotazu, ignorujeme ho!
+                if match_count == 0:
                     continue
 
                 full_link = "https://prehrajto.cz" + href
-                candidates.append((a.get_text(strip=True), full_link))
+                # Uložíme kandidáta i s jeho skóre relevance
+                candidates.append({'text': text, 'link': full_link, 'score': match_count})
 
         print(f"DEBUG: Nalezeno {len(candidates)} relevantních filmů.", file=sys.stderr)
 
         if not candidates:
-            return {"error": "Film nenalezen (žádné relevantní výsledky)."}
+            return {"error": "Žádný odkaz neodpovídá názvu filmu."}
 
-        # Vezmeme první
-        best_title, best_link = candidates[0]
-        print(f"DEBUG: Vybrán vítěz: {best_title} -> {best_link}", file=sys.stderr)
+        # Seřadíme kandidáty podle skóre (nejvíce shodných slov první)
+        candidates.sort(key=lambda x: x['score'], reverse=True)
+
+        best = candidates[0]
+        print(f"DEBUG: Vítěz (skóre {best['score']}): {best['text']} -> {best['link']}", file=sys.stderr)
         
-        video_url = get_direct_video_url(best_link)
+        video_url = get_direct_video_url(best['link'])
         
         if video_url:
-            return {"title": best_title, "url": video_url}
+            return {"title": best['text'].title(), "url": video_url}
         else:
             return {"error": "Nepodařilo se vytáhnout video z přehrávače."}
 
