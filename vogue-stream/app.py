@@ -19,7 +19,7 @@ HEADERS = {
 
 def get_chrome_driver():
     chrome_options = Options()
-    # Tyto argumenty jsou pro Render server nezbytné
+    # Nastavení pro Render server
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
@@ -32,20 +32,15 @@ def get_chrome_driver():
         "/opt/render/project/src/.render/chrome/opt/google/chrome/google-chrome"
     ]
     
-    binary_found = False
     for path in paths:
         if os.path.exists(path):
             print(f"DEBUG: Chrome nalezen: {path}", file=sys.stderr)
             chrome_options.binary_location = path
-            binary_found = True
             break
     
-    if not binary_found:
-        print("DEBUG: Chrome nenalezen na vlastní cestě, spoléhám na systém...", file=sys.stderr)
-
-    # ZDE JE ZMĚNA: Nepoužíváme ChromeDriverManager.
-    # Selenium 4.27 si samo najde/stáhne driver podle verze prohlížeče.
-    service = Service() 
+    # NOVINKA: Nepoužíváme žádný manager. Pouze prázdný Service().
+    # Selenium 4.27+ si samo stáhne správný driver.
+    service = Service()
     
     return webdriver.Chrome(service=service, options=chrome_options)
 
@@ -55,7 +50,7 @@ def get_direct_video_url(page_url):
         print(f"DEBUG: Selenium otevírá: {page_url}", file=sys.stderr)
         driver = get_chrome_driver()
         driver.get(page_url)
-        time.sleep(4) 
+        time.sleep(5) 
         
         # 1. Priorita: ID
         try:
@@ -88,8 +83,8 @@ def find_movie(query):
         r = requests.get(search_url, headers=HEADERS)
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # ČERNÁ LISTINA - slova, která nesmí být v odkazu ani v textu
-        blacklist = ['nahrat', 'profil', 'registrace', 'prihlaseni', 'podminky', 'dmca', 'kontakt', 'premium', 'upload']
+        # PŘÍSNÁ ČERNÁ LISTINA - všechna menu tlačítka
+        blacklist = ['nahrat', 'nahrát', 'profil', 'registrace', 'prihlaseni', 'podminky', 'dmca', 'kontakt', 'premium', 'domů', 'domu', 'videa', 'novinky']
         
         candidates = []
         for a in soup.find_all('a', href=True):
@@ -97,20 +92,22 @@ def find_movie(query):
             text = a.get_text(strip=True).lower()
             href_lower = href.lower()
             
-            # Musí to být interní odkaz a mít nějakou délku
-            if href.startswith('/') and len(text) > 3:
-                
-                # 1. Kontrola Blacklistu (pokud obsahuje zakázané slovo, přeskočit)
+            # Musí to být interní odkaz
+            if href.startswith('/'):
+                # 1. Ignorovat přesnou shodu s rootem (domů)
+                if href == '/' or href == 'https://prehrajto.cz/':
+                    continue
+
+                # 2. Kontrola Blacklistu
                 if any(bad in href_lower for bad in blacklist) or any(bad in text for bad in blacklist):
                     continue
                 
-                # 2. Kontrola relevance (volitelné, ale bezpečné)
-                # Odkaz by měl ideálně obsahovat část hledaného názvu
-                # Rozdělíme hledaný dotaz na slova a zkontrolujeme, zda alespoň jedno je v názvu odkazu
-                query_parts = query.lower().split()
-                if any(part in text for part in query_parts if len(part) > 2):
-                    full_link = "https://prehrajto.cz" + href
-                    candidates.append((a.get_text(strip=True), full_link))
+                # 3. Musí mít rozumnou délku (filmy mají delší názvy než "Domů")
+                if len(text) < 4:
+                    continue
+
+                full_link = "https://prehrajto.cz" + href
+                candidates.append((a.get_text(strip=True), full_link))
 
         print(f"DEBUG: Nalezeno {len(candidates)} relevantních filmů.", file=sys.stderr)
 
